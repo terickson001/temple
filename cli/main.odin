@@ -1,5 +1,6 @@
 package temple_cli
 
+import "base:runtime"
 import "core:bufio"
 import "core:fmt"
 import "core:io"
@@ -32,6 +33,7 @@ Call_Path :: struct {
 }
 
 main :: proc() {
+
 	if len(os.args) < 3 {
 		error(nil, "You need to pass a path and the path to temple")
 	}
@@ -87,114 +89,100 @@ collect_compile_calls :: proc(
 	context.allocator = context.temp_allocator
 
 	fmt.printf("looking for compile calls in %q\n", root)
-
+	pkg, ok := parser.parse_package_from_path(root)
+	if !ok {
+		warn(nil, "%q is not a package", root)
+		return
+	}
 	// TODO: does not support symbolic links, communicate it to users.
 
-	filepath.walk(
-		root,
-		proc(
-			info: os.File_Info,
-			in_err: os.Errno,
-			user_data: rawptr,
-		) -> (
-			err: os.Errno,
-			skip_dir: bool,
-		) {
-			if !info.is_dir {
-				return
+	s.pkg = pkg
+
+	// TODO: multithreading
+	// TODO: return early if not imported
+	// TODO; resolve any way it can be called (like alias `c :: temple.compiled`, or different import name `import t "temple"`)
+
+	v := ast.Visitor {
+		data = &s,
+		visit = proc(visitor: ^ast.Visitor, node: ^ast.Node) -> ^ast.Visitor {
+			if node == nil do return nil
+
+			#partial switch n in node.derived {
+			case ^ast.Import_Decl:
+				if strings.has_prefix(n.fullpath, "\"core:") ||
+				   strings.has_prefix(n.fullpath, "\"base:") ||
+				   strings.has_prefix(n.fullpath, "\"vendor:") {
+					return nil
+				}
+				sub_pkg, ok := parser.parse_package_from_path(n.fullpath)
+				if !ok do return nil
+				s := cast(^Collect_State)visitor.data
+				old_pkg := s.pkg
+				s.pkg = sub_pkg
+				ast.walk(visitor, sub_pkg)
+				s.pkg = old_pkg
+
+			case ^ast.Call_Expr:
+				selector, ok := n.expr.derived_expr.(^ast.Selector_Expr)
+				if !ok do return nil
+
+				ident, iok := selector.expr.derived_expr.(^ast.Ident)
+				if !iok do return nil
+
+				if ident.name != "temple" {
+					return nil
+				}
+
+				if selector.field.name != "compiled" && selector.field.name != "compiled_inline" {
+					return nil
+				}
+
+				s := cast(^Collect_State)visitor.data
+
+				if len(n.args) != 2 {
+					error(
+						n.pos,
+						"calls to `temple.compiled` and `temple.compiled_inline` expect 2 arguments, got %i",
+						len(n.args),
+					)
+				}
+
+				path, pok := n.args[0].derived_expr.(^ast.Basic_Lit)
+				if !pok || path.tok.kind != .String {
+					error(
+						n.pos,
+						"the path/template argument of `temple.compiled` and `temple.compiled_inline` only accepts string literals",
+					)
+				}
+
+				c: Compile_Call
+				c.pos = path.pos
+				c.pos.file = strings.clone(c.pos.file, s.allocator)
+
+				switch selector.field.name {
+				case "compiled":
+					cp: Call_Path
+					defer c.type = cp
+
+					unqouted_path := strings.trim(path.tok.text, "\"`")
+
+					cp.relpath = strings.clone(unqouted_path, s.allocator)
+					cp.fullpath = filepath.join({s.pkg.fullpath, unqouted_path}, s.allocator)
+
+				case "compiled_inline":
+					cp: Call_Inline
+					cp.template = strings.clone(strings.trim(path.tok.text, "\"`"), s.allocator)
+					c.type = cp
+				}
+
+				append(s.calls, c)
 			}
 
-			if in_err != os.ERROR_NONE {
-				warn(nil, "%q error code %i", info.fullpath, in_err)
-				return
-			}
-
-
-			pkg, ok := parser.parse_package_from_path(info.fullpath)
-			if !ok {
-				warn(nil, "%q is not a package", info.fullpath)
-				return
-			}
-
-			s := cast(^Collect_State)user_data
-			s.pkg = pkg
-
-			// TODO: multithreading
-			// TODO: return early if not imported
-			// TODO; resolve any way it can be called (like alias `c :: temple.compiled`, or different import name `import t "temple"`)
-
-			v := ast.Visitor {
-				data = s,
-				visit = proc(visitor: ^ast.Visitor, node: ^ast.Node) -> ^ast.Visitor {
-					if node == nil do return nil
-
-					#partial switch n in node.derived {
-					case ^ast.Call_Expr:
-						selector, ok := n.expr.derived_expr.(^ast.Selector_Expr)
-						if !ok do return nil
-
-						ident, iok := selector.expr.derived_expr.(^ast.Ident)
-						if !iok do return nil
-
-						if ident.name != "temple" {
-							return nil
-						}
-
-						if selector.field.name != "compiled" && selector.field.name != "compiled_inline" {
-							return nil
-						}
-
-						s := cast(^Collect_State)visitor.data
-
-						if len(n.args) != 2 {
-							error(
-								n.pos,
-								"calls to `temple.compiled` and `temple.compiled_inline` expect 2 arguments, got %i",
-								len(n.args),
-							)
-						}
-
-						path, pok := n.args[0].derived_expr.(^ast.Basic_Lit)
-						if !pok || path.tok.kind != .String {
-							error(
-								n.pos,
-								"the path/template argument of `temple.compiled` and `temple.compiled_inline` only accepts string literals",
-							)
-						}
-
-						c: Compile_Call
-						c.pos = path.pos
-						c.pos.file = strings.clone(c.pos.file, s.allocator)
-
-						switch selector.field.name {
-						case "compiled":
-							cp: Call_Path
-							defer c.type = cp
-
-							unqouted_path := strings.trim(path.tok.text, "\"`")
-
-							cp.relpath = strings.clone(unqouted_path, s.allocator)
-							cp.fullpath = filepath.join({s.pkg.fullpath, unqouted_path}, s.allocator)
-
-						case "compiled_inline":
-							cp: Call_Inline
-							cp.template = strings.clone(strings.trim(path.tok.text, "\"`"), s.allocator)
-							c.type = cp
-						}
-
-						append(s.calls, c)
-					}
-
-					return visitor
-				},
-			}
-
-			ast.walk(&v, pkg)
-			return
+			return visitor
 		},
-		&s,
-	)
+	}
 
+	ast.walk(&v, pkg)
 	return
 }
 
@@ -225,14 +213,18 @@ transpile_calls :: proc(temple_path: string, calls: []Compile_Call) {
 			continue
 		}
 
-		if i != len(calls)-1 {
+		if i != len(calls) - 1 {
 			io.write_string(w, "else")
 		}
 	}
 
 	write_generated_file_footer(w, good_calls > 0)
 
-	fmt.printf("found %i compile calls of which %i where successfully compiled\n", len(calls), good_calls)
+	fmt.printf(
+		"found %i compile calls of which %i where successfully compiled\n",
+		len(calls),
+		good_calls,
+	)
 }
 
 write_generated_file_header :: proc(w: io.Writer, has_calls: bool) {
@@ -296,7 +288,7 @@ write_transpiled_call :: proc(w: io.Writer, call: Compile_Call) -> (ok: bool) {
 	parser_init(&parser, data)
 	templ := parse(&parser)
 	if err, has_err := templ.err.?; has_err {
-		pos := tokenizer.Pos{
+		pos := tokenizer.Pos {
 			offset = err.pos.offset,
 			line   = err.pos.line + 1,
 			column = err.pos.col + 1,
@@ -314,24 +306,30 @@ write_transpiled_call :: proc(w: io.Writer, call: Compile_Call) -> (ok: bool) {
 
 write_generated_file_footer :: proc(w: io.Writer, has_calls: bool) {
 	if has_calls {
-		io.write_string(w, ` else {
+		io.write_string(
+			w,
+			` else {
 		#panic("undefined template \"" + path + "\" did you run the temple transpiler?")
 	}
-}`)
+}`,
+		)
 	} else {
-		io.write_string(w, `	#panic("undefined template \"" + path + "\" did you run the temple transpiler?")
-}`)
+		io.write_string(
+			w,
+			`	#panic("undefined template \"" + path + "\" did you run the temple transpiler?")
+}`,
+		)
 	}
 }
 
 embed_parser :: proc(node: ^Node_Embed, parent_path_: rawptr) -> (Template, bool) {
 	parent_path := (cast(^string)parent_path_)^
-	relpath := node.path.value[1:len(node.path.value)-1]
+	relpath := node.path.value[1:len(node.path.value) - 1]
 	fullpath := filepath.join({filepath.dir(parent_path), relpath})
 
 	data, ok := os.read_entire_file_from_filename(fullpath)
 	if !ok {
-		pos := tokenizer.Pos{
+		pos := tokenizer.Pos {
 			offset = node.path.pos.offset,
 			line   = node.path.pos.line + 1,
 			column = node.path.pos.col + 1,
@@ -347,7 +345,7 @@ embed_parser :: proc(node: ^Node_Embed, parent_path_: rawptr) -> (Template, bool
 	parser_init(&parser, data)
 	templ := parse(&parser)
 	if err, has_err := templ.err.?; has_err {
-		pos := tokenizer.Pos{
+		pos := tokenizer.Pos {
 			offset = err.pos.offset,
 			line   = err.pos.line + 1,
 			column = err.pos.col + 1,

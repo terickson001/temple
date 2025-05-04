@@ -1,5 +1,6 @@
 package temple
 
+import "core:fmt"
 import "core:io"
 
 /*
@@ -39,4 +40,10 @@ __temple_write_escaped_string :: proc(w: io.Writer, str: string) -> (n: int, err
 		}
 	}
 	return
+}
+
+__temple_write_fmt :: proc(w: io.Writer, format: string, args: ..any) -> (n: int, err: io.Error) {
+	str := fmt.aprintf(format, ..args)
+	defer delete(str)
+	return __temple_write_escaped_string(w, str)
 }

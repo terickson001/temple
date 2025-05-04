@@ -8,9 +8,9 @@ import "core:strings"
 ws :: io.write_string
 
 // Identifiers used in the transpiled output.
-PKG_IO  :: "__temple_io"
-ARG_W   :: "__temple_w"
-RET_N   :: "__temple_n"
+PKG_IO :: "__temple_io"
+ARG_W :: "__temple_w"
+RET_N :: "__temple_n"
 RET_ERR :: "__temple_err"
 
 Transpiler :: struct {
@@ -19,7 +19,6 @@ Transpiler :: struct {
 	indent:       string,
 	indented:     int,
 	approx_bytes: int,
-
 	embed_parser: Embed_Parser,
 	embed_data:   rawptr,
 }
@@ -45,7 +44,14 @@ write_indent :: proc(t: ^Transpiler) {
 	}
 }
 
-transpile :: proc(w: io.Writer, identifier: string, templ: Template, embed_parser: Embed_Parser, embed_data: rawptr, allocator := context.allocator) {
+transpile :: proc(
+	w: io.Writer,
+	identifier: string,
+	templ: Template,
+	embed_parser: Embed_Parser,
+	embed_data: rawptr,
+	allocator := context.allocator,
+) {
 	t: Transpiler
 	t.embed_parser = embed_parser
 	t.embed_data = embed_data
@@ -64,7 +70,15 @@ transpile :: proc(w: io.Writer, identifier: string, templ: Template, embed_parse
 
 	indent(&t)
 	write_newline(&t)
-	fmt.wprintf(t.w, "with = proc(%s: %s.Writer, this: T) -> (%s: int, %s: %s.Error) {{", ARG_W, PKG_IO, RET_N, RET_ERR, PKG_IO)
+	fmt.wprintf(
+		t.w,
+		"with = proc(%s: %s.Writer, this: T) -> (%s: int, %s: %s.Error) {{",
+		ARG_W,
+		PKG_IO,
+		RET_N,
+		RET_ERR,
+		PKG_IO,
+	)
 
 	indent(&t)
 	write_newline(&t)
@@ -147,6 +161,9 @@ transpile_output :: proc(t: ^Transpiler, node: ^Node_Output) {
 		fmt.wprintf(t.w, "%s.write_f32(", PKG_IO)
 	case strings.has_prefix(v, "f64("):
 		fmt.wprintf(t.w, "%s.write_f64(", PKG_IO)
+	case strings.has_prefix(v, "fmt("):
+		fmt.wprintf(t.w, "__temple_write_fmt(")
+		v = v[4:len(v) - 1]
 	case:
 		ws(t.w, "__temple_write_escaped_string(")
 	}
